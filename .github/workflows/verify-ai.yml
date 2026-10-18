@@ -18,10 +18,8 @@ jobs:
       - name: Generate four images with Gemini without publishing
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GITHUB_ACTIONS: 'false'
         run: |
-          python -c "import json,pathlib;p=pathlib.Path('config.json');c=json.loads(p.read_text());c['enabled']=True;p.write_text(json.dumps(c))"
-          python bot.py prepare
+          python -c "import bot;from pathlib import Path;from datetime import datetime;from zoneinfo import ZoneInfo;day=datetime.now(ZoneInfo('Asia/Tokyo')).date().isoformat();post=bot.generate(day,{});bot.render(post,Path('public')/day);print('AI generation and four-image verification succeeded')"
       - uses: actions/upload-artifact@v4
         with:
           name: ai-generated-carousel
