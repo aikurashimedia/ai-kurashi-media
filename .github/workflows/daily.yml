@@ -1,0 +1,94 @@
+name: AI Kurashi Auto Post
+on:
+  push:
+    paths: ['.github/workflows/daily.yml']
+  schedule:
+    - cron: '17 11 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Run mode
+        type: choice
+        default: preview
+        options: [preview, preflight, generate, publish]
+permissions:
+  contents: write
+concurrency:
+  group: instagram-publisher
+  cancel-in-progress: false
+jobs:
+  post:
+    if: github.event_name != 'schedule' || vars.AUTOPOST_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install uploaded package
+        run: |
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path, PurePosixPath
+          from zipfile import ZipFile
+          package = Path('ai-kurashi-system.zip')
+          assert hashlib.sha256(package.read_bytes()).hexdigest() == 'e6dbe6bc4f3a4f4d7da57f21063da1982595b13ceae86017e0989f3134151c44', 'Package checksum mismatch'
+          with ZipFile(package) as archive:
+              for item in archive.infolist():
+                  path = PurePosixPath(item.filename)
+                  assert path.parts[0] == 'ai-kurashi' and '..' not in path.parts
+                  parts = path.parts[1:]
+                  if not parts or parts[0] in ('.github', 'output') or item.is_dir():
+                      continue
+                  target = Path('SETUP.md') if parts == ('README.md',) else Path(*parts)
+                  if not target.exists():
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      target.write_bytes(archive.read(item))
+          PY
+          git config user.name 'ai-kurashi-bot'
+          git config user.email 'ai-kurashi-bot@users.noreply.github.com'
+          git add bot.py config.json requirements.txt .gitignore assets state tests SETUP.md
+          if ! git diff --cached --quiet; then
+            git commit -m 'Install carousel generator and publication safeguards'
+            git push origin HEAD:main
+          fi
+      - run: pip install -r requirements.txt
+      - name: Verify generator and safeguards
+        run: python -m unittest discover -s tests -v
+      - name: Build four-image preview
+        if: github.event_name == 'push' || inputs.mode == 'preview'
+        run: python bot.py demo
+      - name: Check Meta without publishing
+        if: inputs.mode == 'preflight'
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+        run: python bot.py preflight
+      - name: Generate with AI without publishing
+        if: inputs.mode == 'generate'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_ACTIONS: 'false'
+        run: |
+          python -c "import json,pathlib;p=pathlib.Path('config.json');c=json.loads(p.read_text());c['enabled']=True;p.write_text(json.dumps(c))"
+          python bot.py prepare
+      - name: Publish enabled daily post
+        if: (github.event_name == 'schedule' || inputs.mode == 'publish') && vars.AUTOPOST_ENABLED == 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+        run: |
+          python -c "import json,pathlib;p=pathlib.Path('config.json');c=json.loads(p.read_text());c['enabled']=True;p.write_text(json.dumps(c))"
+          POST_DATE=$(TZ=Asia/Tokyo date +%F)
+          python bot.py prepare --date "$POST_DATE"
+          python bot.py publish --date "$POST_DATE"
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push' || inputs.mode == 'preview' || inputs.mode == 'generate'
+        with:
+          name: carousel-preview
+          path: |
+            output/demo/
+            public/
+          retention-days: 3
